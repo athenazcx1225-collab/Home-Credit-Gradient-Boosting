@@ -1,0 +1,949 @@
+from sklearn.metrics import ConfusionMatrixDisplay
+from sklearn.metrics import PrecisionRecallDisplay
+from sklearn.metrics import RocCurveDisplay
+from sklearn.model_selection import cross_val_predict
+from sklearn.ensemble import HistGradientBoostingClassifier
+from sklearn.metrics import roc_auc_score
+from sklearn.linear_model import LogisticRegression
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+import numpy as np
+from sklearn.impute import SimpleImputer
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
+from sklearn.inspection import permutation_importance
+from sklearn.model_selection import StratifiedKFold, cross_val_score
+from sklearn.pipeline import Pipeline
+from sklearn.inspection import permutation_importance
+from sklearn.metrics import roc_auc_score
+from sklearn.model_selection import GridSearchCV
+
+feature_results = pd.DataFrame({
+    "Feature_Set": [
+        "Application",
+        "+ Bureau",
+        "+ Bureau Status",
+        "+ Previous Application",
+        "+ Installments",
+        "+ Bureau Balance",
+        "+ POS_CASH",
+        "+ Credit Card Balance"
+    ],
+    "Mean_ROC_AUC": [
+        0.75678655,
+        0.76043735,
+        0.76141606,
+        0.76367067,
+        0.76935360,
+        0.76963488,
+        0.77538958,
+        0.77878600
+    ]
+})
+
+print(feature_results)
+
+# Load application data
+df = pd.read_csv("application_train.csv")
+
+# Feature engineering
+df["AGE_YEARS"] = -df["DAYS_BIRTH"] / 365
+df["INCOME_LOG"] = np.log1p(df["AMT_INCOME_TOTAL"])
+
+# load bureau
+bureau = pd.read_csv("bureau.csv")
+print(bureau.shape)
+print(bureau.columns.tolist())
+print(bureau["SK_ID_CURR"].nunique())
+print(bureau["SK_ID_CURR"].duplicated().sum())
+
+bureau_agg = bureau.groupby("SK_ID_CURR").agg({
+    "DAYS_CREDIT": ["mean", "min", "max"],
+    "CREDIT_DAY_OVERDUE": ["mean", "max"],
+    "AMT_CREDIT_SUM": ["sum", "mean", "max"],
+    "AMT_CREDIT_SUM_DEBT": ["sum", "mean", "max"],
+    "AMT_CREDIT_SUM_OVERDUE": ["sum", "mean", "max"],
+    "CNT_CREDIT_PROLONG": ["sum", "max"],
+    "AMT_ANNUITY": ["sum", "mean", "max"]
+})
+
+bureau_agg.columns = [
+    f"BUREAU_{col[0]}_{col[1].upper()}"
+    for col in bureau_agg.columns
+]
+
+bureau_agg = bureau_agg.reset_index()
+
+print(bureau_agg.head())
+
+df_bureau = df.merge(
+    bureau_agg,
+    on="SK_ID_CURR",
+    how="left"
+)
+
+print(df.shape)
+print(df_bureau.shape)
+
+x_bureau = df_bureau.drop(columns=["TARGET", "SK_ID_CURR"])
+y_bureau = df_bureau["TARGET"]
+
+cat_cols_bureau = x_bureau.select_dtypes(
+    include=["object", "str"]
+).columns
+x_bureau = pd.get_dummies(
+    x_bureau,
+    columns=cat_cols_bureau,
+    dummy_na=True
+)
+gb_bureau = Pipeline([
+    ("imputer", SimpleImputer(strategy="median")),
+    ("model", HistGradientBoostingClassifier(
+        max_iter=200,
+        learning_rate=0.05,
+        max_leaf_nodes=31,
+        random_state=42
+    ))
+])
+
+cv = StratifiedKFold(
+    n_splits=5,
+    shuffle=True,
+    random_state=42
+)
+
+cv_scores_bureau = cross_val_score(
+    gb_bureau,
+    x_bureau,
+    y_bureau,
+    cv=cv,
+    scoring="roc_auc",
+    n_jobs=-1
+)
+
+print("Bureau CV ROC-AUC:", cv_scores_bureau)
+print("Bureau Mean ROC-AUC:", cv_scores_bureau.mean())
+print(bureau["CREDIT_ACTIVE"].value_counts())
+
+bureau_status = pd.crosstab(
+    bureau["SK_ID_CURR"],
+    bureau["CREDIT_ACTIVE"]
+).reset_index()
+
+bureau_status.columns = ["SK_ID_CURR",
+                         "BUREAU_ACTIVE_COUNT",
+                         "BUREAU_CLOSED_COUNT",
+                         "BUREAU_BAD_DEBT_COUNT",
+                         "BUREAU_SOLD_COUNT"]
+
+
+bureau_features = bureau_agg.merge(
+    bureau_status,
+    on="SK_ID_CURR",
+    how="left"
+)
+
+df_bureau_full = df.merge(
+    bureau_features,
+    on="SK_ID_CURR",
+    how="left"
+)
+print(df_bureau_full.shape)
+x_bureau_full = df_bureau_full.drop(columns=["TARGET", "SK_ID_CURR"])
+y_bureau_full = df_bureau_full["TARGET"]
+
+cat_cols_bureau_full = x_bureau_full.select_dtypes(
+    include=["object", "str"]
+).columns
+x_bureau_full = pd.get_dummies(
+    x_bureau_full,
+    columns=cat_cols_bureau_full,
+    dummy_na=True
+)
+gb_bureau_full = Pipeline([
+    ("imputer", SimpleImputer(strategy="median")),
+    ("model", HistGradientBoostingClassifier(
+        max_iter=200,
+        learning_rate=0.05,
+        max_leaf_nodes=31,
+        random_state=42
+    ))
+])
+
+cv = StratifiedKFold(
+    n_splits=5,
+    shuffle=True,
+    random_state=42
+)
+
+cv_scores_bureau_full = cross_val_score(
+    gb_bureau_full,
+    x_bureau_full,
+    y_bureau_full,
+    cv=cv,
+    scoring="roc_auc",
+    n_jobs=-1
+)
+
+print("Bureau CV ROC-AUC:", cv_scores_bureau_full)
+print("Bureau Mean ROC-AUC:", cv_scores_bureau_full.mean())
+print(bureau["CREDIT_ACTIVE"].value_counts())
+
+
+# previous application
+previous = pd.read_csv("previous_application.csv")
+print(previous.shape)
+print(previous.columns.tolist())
+print(previous["NAME_CONTRACT_STATUS"].value_counts())
+
+previous_agg = previous.groupby("SK_ID_CURR").agg(
+    PREV_APP_COUNT=("SK_ID_PREV", "count"),
+    PREV_APPROVED_COUNT=("NAME_CONTRACT_STATUS",
+                         lambda x: (x == "Approved").sum()),
+    PREV_REFUSED_COUNT=("NAME_CONTRACT_STATUS",
+                        lambda x: (x == "Refused").sum()),
+    PREV_CANCELED_COUNT=("NAME_CONTRACT_STATUS",
+                         lambda x: (x == "Canceled").sum()),
+    PREV_AMT_APPLICATION_MEAN=("AMT_APPLICATION", "mean"),
+    PREV_AMT_CREDIT_MEAN=("AMT_CREDIT", "mean"),
+    PREV_AMT_CREDIT_SUM=("AMT_CREDIT", "sum"),
+    PREV_DAYS_DECISION_MEAN=("DAYS_DECISION", "mean")
+).reset_index()
+
+df_bureau_prev = df_bureau_full.merge(
+    previous_agg,
+    on="SK_ID_CURR",
+    how="left"
+)
+
+print(df_bureau_prev.shape)
+
+X_bureau_prev = df_bureau_prev.drop(columns=["TARGET", "SK_ID_CURR"])
+y_bureau_prev = df_bureau_prev["TARGET"]
+
+cat_cols_bureau_prev = X_bureau_prev.select_dtypes(
+    include=["object", "str"]
+).columns
+
+X_bureau_prev = pd.get_dummies(
+    X_bureau_prev,
+    columns=cat_cols_bureau_prev,
+    dummy_na=True
+)
+
+gb_bureau_prev = Pipeline([
+    ("imputer", SimpleImputer(strategy="median")),
+    ("model", HistGradientBoostingClassifier(
+        max_iter=200,
+        learning_rate=0.05,
+        max_leaf_nodes=31,
+        random_state=42
+    ))
+])
+
+cv_scores_bureau_prev = cross_val_score(
+    gb_bureau_prev,
+    X_bureau_prev,
+    y_bureau_prev,
+    cv=cv,
+    scoring="roc_auc",
+    n_jobs=-1
+)
+
+print("Bureau + Previous CV ROC-AUC:", cv_scores_bureau_prev)
+print("Bureau + Previous Mean ROC-AUC:", cv_scores_bureau_prev.mean())
+
+# installments
+installments = pd.read_csv("installments_payments.csv")
+
+# How late was the payment?
+installments["DPD"] = (
+    installments["DAYS_ENTRY_PAYMENT"]
+    - installments["DAYS_INSTALMENT"]
+).clip(lower=0)
+
+# Payment amount relative to installment amount
+installments["PAYMENT_RATIO"] = (
+    installments["AMT_PAYMENT"] /
+    installments["AMT_INSTALMENT"].replace(0, np.nan)
+)
+
+# Difference between scheduled and actual payment
+installments["PAYMENT_DIFF"] = (
+    installments["AMT_PAYMENT"]
+    - installments["AMT_INSTALMENT"]
+)
+
+# Whether the payment was late
+installments["LATE_PAYMENT"] = (
+    installments["DPD"] > 0
+).astype(int)
+
+# Number of payment records
+installments["PAYMENT_COUNT"] = 1
+
+installments_agg = installments.groupby("SK_ID_CURR").agg(
+    INST_PAYMENT_COUNT=("PAYMENT_COUNT", "sum"),
+    INST_LATE_COUNT=("LATE_PAYMENT", "sum"),
+    INST_LATE_RATIO=("LATE_PAYMENT", "mean"),
+    INST_DPD_MEAN=("DPD", "mean"),
+    INST_DPD_MAX=("DPD", "max"),
+    INST_PAYMENT_RATIO_MEAN=("PAYMENT_RATIO", "mean"),
+    INST_PAYMENT_DIFF_MEAN=("PAYMENT_DIFF", "mean"),
+    INST_PAYMENT_AMOUNT_SUM=("AMT_PAYMENT", "sum"),
+    INST_PAYMENT_AMOUNT_MEAN=("AMT_PAYMENT", "mean")
+).reset_index()
+
+df_bureau_prev_inst = df_bureau_prev.merge(
+    installments_agg,
+    on="SK_ID_CURR",
+    how="left"
+)
+
+print(df_bureau_prev_inst.shape)
+
+X_bureau_prev_inst = df_bureau_prev_inst.drop(columns=["TARGET", "SK_ID_CURR"])
+y_bureau_prev_inst = df_bureau_prev_inst["TARGET"]
+
+cat_cols_bureau_prev_inst = X_bureau_prev_inst.select_dtypes(
+    include=["object", "str"]
+).columns
+
+X_bureau_prev_inst = pd.get_dummies(
+    X_bureau_prev_inst,
+    columns=cat_cols_bureau_prev_inst,
+    dummy_na=True
+)
+
+gb_bureau_prev_inst = Pipeline([
+    ("imputer", SimpleImputer(strategy="median")),
+    ("model", HistGradientBoostingClassifier(
+        max_iter=200,
+        learning_rate=0.05,
+        max_leaf_nodes=31,
+        random_state=42
+    ))
+])
+
+cv_scores_bureau_prev_inst = cross_val_score(
+    gb_bureau_prev_inst,
+    X_bureau_prev_inst,
+    y_bureau_prev_inst,
+    cv=cv,
+    scoring="roc_auc",
+    n_jobs=-1
+)
+
+print("Bureau + Previous CV +previous install ROC-AUC:",
+      cv_scores_bureau_prev_inst)
+print("Bureau + Previous Mean + previous install ROC-AUC:",
+      cv_scores_bureau_prev_inst.mean())
+
+
+# bureau_balance
+
+
+# 1. Create monthly-level indicators
+bureau_balance = pd.read_csv("bureau_balance.csv")
+
+
+bureau_balance["STATUS_LATE"] = bureau_balance["STATUS"].isin(
+    ["1", "2", "3", "4", "5"]
+).astype(int)
+
+bureau_balance["STATUS_SERIOUS_LATE"] = bureau_balance["STATUS"].isin(
+    ["3", "4", "5"]
+).astype(int)
+
+bureau_balance["STATUS_0"] = (
+    bureau_balance["STATUS"] == "0"
+).astype(int)
+
+
+# 2. Aggregate monthly records to each bureau credit
+bureau_balance_agg = bureau_balance.groupby("SK_ID_BUREAU").agg(
+    BB_MONTH_COUNT=("MONTHS_BALANCE", "count"),
+    BB_LATE_COUNT=("STATUS_LATE", "sum"),
+    BB_LATE_RATIO=("STATUS_LATE", "mean"),
+    BB_SERIOUS_LATE_COUNT=("STATUS_SERIOUS_LATE", "sum"),
+    BB_SERIOUS_LATE_RATIO=("STATUS_SERIOUS_LATE", "mean"),
+    BB_ON_TIME_RATIO=("STATUS_0", "mean")
+).reset_index()
+
+
+# 3. Connect each bureau credit to the applicant
+bureau_balance_with_curr = bureau_balance_agg.merge(
+    bureau[["SK_ID_BUREAU", "SK_ID_CURR"]],
+    on="SK_ID_BUREAU",
+    how="left"
+)
+
+
+# 4. Aggregate bureau balance information to applicant level
+bureau_balance_curr_agg = bureau_balance_with_curr.groupby(
+    "SK_ID_CURR"
+).agg(
+    BB_ACCOUNT_COUNT=("SK_ID_BUREAU", "nunique"),
+    BB_MONTH_COUNT_MEAN=("BB_MONTH_COUNT", "mean"),
+    BB_MONTH_COUNT_SUM=("BB_MONTH_COUNT", "sum"),
+    BB_LATE_COUNT_SUM=("BB_LATE_COUNT", "sum"),
+    BB_LATE_RATIO_MEAN=("BB_LATE_RATIO", "mean"),
+    BB_SERIOUS_LATE_COUNT_SUM=("BB_SERIOUS_LATE_COUNT", "sum"),
+    BB_SERIOUS_LATE_RATIO_MEAN=("BB_SERIOUS_LATE_RATIO", "mean"),
+    BB_ON_TIME_RATIO_MEAN=("BB_ON_TIME_RATIO", "mean")
+).reset_index()
+
+df_bureau_prev_inst_balance = df_bureau_prev_inst.merge(
+    bureau_balance_curr_agg,
+    on="SK_ID_CURR",
+    how="left"
+)
+
+print(df_bureau_prev_inst_balance.shape)
+X_bureau_prev_inst_balance = df_bureau_prev_inst_balance.drop(
+    columns=["TARGET", "SK_ID_CURR"]
+)
+
+y_bureau_prev_inst_balance = df_bureau_prev_inst_balance["TARGET"]
+
+cat_cols_bureau_prev_inst_balance = (
+    X_bureau_prev_inst_balance
+    .select_dtypes(include=["object", "str"])
+    .columns
+)
+
+X_bureau_prev_inst_balance = pd.get_dummies(
+    X_bureau_prev_inst_balance,
+    columns=cat_cols_bureau_prev_inst_balance,
+    dummy_na=True
+)
+
+gb_bureau_prev_inst_balance = Pipeline([
+    ("imputer", SimpleImputer(strategy="median")),
+    ("model", HistGradientBoostingClassifier(
+        max_iter=200,
+        learning_rate=0.05,
+        max_leaf_nodes=31,
+        random_state=42
+    ))
+])
+
+cv_scores_bureau_prev_inst_balance = cross_val_score(
+    gb_bureau_prev_inst_balance,
+    X_bureau_prev_inst_balance,
+    y_bureau_prev_inst_balance,
+    cv=cv,
+    scoring="roc_auc",
+    n_jobs=-1
+)
+
+print(
+    "Bureau + Previous + Installments + Balance ROC-AUC:",
+    cv_scores_bureau_prev_inst_balance
+)
+
+print(
+    "Bureau + Previous + Installments + Balance Mean ROC-AUC:",
+    cv_scores_bureau_prev_inst_balance.mean()
+)
+
+# pos
+
+pos_cash = pd.read_csv("POS_CASH_balance.csv")
+
+pos_cash["POS_DPD"] = pos_cash["SK_DPD"].clip(lower=0)
+pos_cash["POS_DPD_DEF"] = pos_cash["SK_DPD_DEF"].clip(lower=0)
+
+pos_cash["POS_LATE"] = (
+    pos_cash["SK_DPD"] > 0
+).astype(int)
+
+pos_cash["POS_LATE_DEF"] = (
+    pos_cash["SK_DPD_DEF"] > 0
+).astype(int)
+
+
+# 2. First aggregate at previous-loan level
+#    One SK_ID_PREV = one previous loan
+pos_per_prev = pos_cash.groupby("SK_ID_PREV").agg(
+    POS_MONTH_CNT=("MONTHS_BALANCE", "count"),
+
+    POS_DPD_MAX=("POS_DPD", "max"),
+    POS_DPD_MEAN=("POS_DPD", "mean"),
+
+    POS_DPD_DEF_MAX=("POS_DPD_DEF", "max"),
+    POS_DPD_DEF_MEAN=("POS_DPD_DEF", "mean"),
+
+    POS_LATE_SUM=("POS_LATE", "sum"),
+    POS_LATE_RATIO=("POS_LATE", "mean"),
+
+    POS_LATE_DEF_SUM=("POS_LATE_DEF", "sum"),
+    POS_LATE_DEF_RATIO=("POS_LATE_DEF", "mean"),
+
+    POS_INSTALLMENT_MEAN=("CNT_INSTALMENT", "mean"),
+    POS_INSTALLMENT_FUTURE_MEAN=("CNT_INSTALMENT_FUTURE", "mean")
+).reset_index()
+
+
+# 3. Add SK_ID_CURR back
+pos_per_prev = pos_per_prev.merge(
+    pos_cash[["SK_ID_PREV", "SK_ID_CURR"]].drop_duplicates(),
+    on="SK_ID_PREV",
+    how="left"
+)
+
+
+# 4. Aggregate previous loans to customer level
+#    One SK_ID_CURR = one customer
+pos_per_curr = pos_per_prev.groupby("SK_ID_CURR").agg(
+    POS_LOAN_COUNT=("SK_ID_PREV", "nunique"),
+
+    POS_MONTH_CNT_MEAN=("POS_MONTH_CNT", "mean"),
+    POS_MONTH_CNT_SUM=("POS_MONTH_CNT", "sum"),
+
+    POS_DPD_MAX=("POS_DPD_MAX", "max"),
+    POS_DPD_MEAN=("POS_DPD_MEAN", "mean"),
+
+    POS_DPD_DEF_MAX=("POS_DPD_DEF_MAX", "max"),
+    POS_DPD_DEF_MEAN=("POS_DPD_DEF_MEAN", "mean"),
+
+    POS_LATE_SUM=("POS_LATE_SUM", "sum"),
+    POS_LATE_RATIO_MEAN=("POS_LATE_RATIO", "mean"),
+
+    POS_LATE_DEF_SUM=("POS_LATE_DEF_SUM", "sum"),
+    POS_LATE_DEF_RATIO_MEAN=("POS_LATE_DEF_RATIO", "mean"),
+
+    POS_INSTALLMENT_MEAN=("POS_INSTALLMENT_MEAN", "mean"),
+    POS_INSTALLMENT_FUTURE_MEAN=("POS_INSTALLMENT_FUTURE_MEAN", "mean")
+).reset_index()
+
+
+# 5. Merge POS_CASH features into our main dataset
+df_bureau_pos = df_bureau_prev_inst_balance.merge(
+    pos_per_curr,
+    on="SK_ID_CURR",
+    how="left"
+)
+
+X_bureau_pos = df_bureau_pos.drop(
+    columns=["TARGET", "SK_ID_CURR"]
+)
+
+y_bureau_pos = df_bureau_pos["TARGET"]
+
+# One-hot encode categorical variables
+cat_cols_bureau_pos = X_bureau_pos.select_dtypes(
+    include=["object", "str"]
+).columns
+
+X_bureau_pos = pd.get_dummies(
+    X_bureau_pos,
+    columns=cat_cols_bureau_pos,
+    dummy_na=True
+)
+
+# Same model as before
+gb_bureau_pos = Pipeline([
+    ("imputer", SimpleImputer(strategy="median")),
+    ("model", HistGradientBoostingClassifier(
+        max_iter=200,
+        learning_rate=0.05,
+        max_leaf_nodes=31,
+        random_state=42
+    ))
+])
+
+# 5-fold CV
+cv_scores_bureau_pos = cross_val_score(
+    gb_bureau_pos,
+    X_bureau_pos,
+    y_bureau_pos,
+    cv=cv,
+    scoring="roc_auc",
+    n_jobs=-1
+)
+
+print(
+    "Bureau + Previous + Installments + Balance + POS ROC-AUC:",
+    cv_scores_bureau_pos
+)
+
+print(
+    "Bureau + Previous + Installments + Balance + POS Mean ROC-AUC:",
+    cv_scores_bureau_pos.mean()
+)
+
+# credit card balance
+credit_card = pd.read_csv("credit_card_balance.csv")
+credit_card["CC_DPD"] = credit_card["SK_DPD"].clip(lower=0)
+credit_card["CC_DPD_DEF"] = credit_card["SK_DPD_DEF"].clip(lower=0)
+
+credit_card["CC_LATE"] = (
+    credit_card["SK_DPD"] > 0
+).astype(int)
+credit_card["CC_LATE_DEF"] = (
+    credit_card["SK_DPD_DEF"] > 0
+).astype(int)
+
+
+credit_card["CC_UTILIZATION"] = (
+    credit_card["AMT_BALANCE"]/credit_card["AMT_CREDIT_LIMIT_ACTUAL"].replace(0, np.nan))
+credit_card["CC_PAYMENT_RATIO"] = (
+    credit_card["AMT_PAYMENT_TOTAL_CURRENT"]/credit_card["AMT_BALANCE"].replace(0, np.nan))
+
+cc_per_prev = credit_card.groupby("SK_ID_PREV").agg(
+    CC_MONTH_CNT=("MONTHS_BALANCE", "count"),
+
+    CC_BALANCE_MEAN=("AMT_BALANCE", "mean"),
+    CC_BALANCE_MAX=("AMT_BALANCE", "max"),
+
+    CC_LIMIT_MEAN=("AMT_CREDIT_LIMIT_ACTUAL", "mean"),
+    CC_LIMIT_MAX=("AMT_CREDIT_LIMIT_ACTUAL", "max"),
+
+    CC_UTILIZATION_MEAN=("CC_UTILIZATION", "mean"),
+    CC_UTILIZATION_MAX=("CC_UTILIZATION", "max"),
+
+    CC_PAYMENT_MEAN=("AMT_PAYMENT_TOTAL_CURRENT", "mean"),
+    CC_PAYMENT_SUM=("AMT_PAYMENT_TOTAL_CURRENT", "sum"),
+
+    CC_PAYMENT_RATIO_MEAN=("CC_PAYMENT_RATIO", "mean"),
+
+    CC_DRAWING_MEAN=("AMT_DRAWINGS_CURRENT", "mean"),
+    CC_DRAWING_SUM=("AMT_DRAWINGS_CURRENT", "sum"),
+
+    CC_DPD_MEAN=("CC_DPD", "mean"),
+    CC_DPD_MAX=("CC_DPD", "max"),
+
+    CC_DPD_DEF_MEAN=("CC_DPD_DEF", "mean"),
+    CC_DPD_DEF_MAX=("CC_DPD_DEF", "max"),
+
+    CC_LATE_SUM=("CC_LATE", "sum"),
+    CC_LATE_RATIO=("CC_LATE", "mean"),
+
+    CC_LATE_DEF_SUM=("CC_LATE_DEF", "sum"),
+    CC_LATE_DEF_RATIO=("CC_LATE_DEF", "mean"),
+
+    CC_ATM_DRAWING_MEAN=("AMT_DRAWINGS_ATM_CURRENT", "mean"),
+    CC_POS_DRAWING_MEAN=("AMT_DRAWINGS_POS_CURRENT", "mean"),
+
+    CC_DRAWING_COUNT_MEAN=("CNT_DRAWINGS_CURRENT", "mean"),
+    CC_MATURE_INST_MEAN=("CNT_INSTALMENT_MATURE_CUM", "mean")
+).reset_index()
+
+cc_per_prev = cc_per_prev.merge(
+    credit_card[["SK_ID_PREV", "SK_ID_CURR"]].drop_duplicates(),
+    on="SK_ID_PREV",
+    how="left"
+)
+
+cc_per_curr = cc_per_prev.groupby("SK_ID_CURR").agg(
+    CC_CARD_COUNT=("SK_ID_PREV", "nunique"),
+
+    CC_MONTH_CNT_MEAN=("CC_MONTH_CNT", "mean"),
+    CC_MONTH_CNT_SUM=("CC_MONTH_CNT", "sum"),
+
+    CC_BALANCE_MEAN=("CC_BALANCE_MEAN", "mean"),
+    CC_BALANCE_MAX=("CC_BALANCE_MAX", "max"),
+
+    CC_LIMIT_MEAN=("CC_LIMIT_MEAN", "mean"),
+    CC_LIMIT_MAX=("CC_LIMIT_MAX", "max"),
+
+    CC_UTILIZATION_MEAN=("CC_UTILIZATION_MEAN", "mean"),
+    CC_UTILIZATION_MAX=("CC_UTILIZATION_MAX", "max"),
+
+    CC_PAYMENT_MEAN=("CC_PAYMENT_MEAN", "mean"),
+    CC_PAYMENT_SUM=("CC_PAYMENT_SUM", "sum"),
+
+    CC_PAYMENT_RATIO_MEAN=("CC_PAYMENT_RATIO_MEAN", "mean"),
+
+    CC_DRAWING_MEAN=("CC_DRAWING_MEAN", "mean"),
+    CC_DRAWING_SUM=("CC_DRAWING_SUM", "sum"),
+
+    CC_DPD_MEAN=("CC_DPD_MEAN", "mean"),
+    CC_DPD_MAX=("CC_DPD_MAX", "max"),
+
+    CC_DPD_DEF_MEAN=("CC_DPD_DEF_MEAN", "mean"),
+    CC_DPD_DEF_MAX=("CC_DPD_DEF_MAX", "max"),
+
+    CC_LATE_SUM=("CC_LATE_SUM", "sum"),
+    CC_LATE_RATIO_MEAN=("CC_LATE_RATIO", "mean"),
+
+    CC_LATE_DEF_SUM=("CC_LATE_DEF_SUM", "sum"),
+    CC_LATE_DEF_RATIO_MEAN=("CC_LATE_DEF_RATIO", "mean"),
+
+    CC_ATM_DRAWING_MEAN=("CC_ATM_DRAWING_MEAN", "mean"),
+    CC_POS_DRAWING_MEAN=("CC_POS_DRAWING_MEAN", "mean"),
+
+    CC_DRAWING_COUNT_MEAN=("CC_DRAWING_COUNT_MEAN", "mean"),
+    CC_MATURE_INST_MEAN=("CC_MATURE_INST_MEAN", "mean")
+).reset_index()
+
+
+# 5. Merge into our current best dataset
+
+df_bureau_pos_cc = df_bureau_pos.merge(
+    cc_per_curr,
+    on="SK_ID_CURR",
+    how="left"
+)
+
+X_bureau_pos_cc = df_bureau_pos_cc.drop(
+    columns=["TARGET", "SK_ID_CURR"]
+)
+
+y_bureau_pos_cc = df_bureau_pos_cc["TARGET"]
+
+# One-hot encode categorical variables
+cat_cols_bureau_pos_cc = X_bureau_pos_cc.select_dtypes(
+    include=["object", "str"]
+).columns
+
+X_bureau_pos_cc = pd.get_dummies(
+    X_bureau_pos_cc,
+    columns=cat_cols_bureau_pos_cc,
+    dummy_na=True
+)
+
+# Same model as before
+gb_bureau_pos_cc = Pipeline([
+    ("imputer", SimpleImputer(strategy="median")),
+    ("model", HistGradientBoostingClassifier(
+        max_iter=200,
+        learning_rate=0.05,
+        max_leaf_nodes=31,
+        random_state=42
+    ))
+])
+
+# 5-fold CV
+cv_scores_bureau_pos_cc = cross_val_score(
+    gb_bureau_pos_cc,
+    X_bureau_pos_cc,
+    y_bureau_pos_cc,
+    cv=cv,
+    scoring="roc_auc",
+    n_jobs=-1
+)
+
+print(
+    "Bureau + Previous + Installments + Balance + POS_cc ROC-AUC:",
+    cv_scores_bureau_pos_cc
+)
+
+print(
+    "Bureau + Previous + Installments + Balance + POS_cc Mean ROC-AUC:",
+    cv_scores_bureau_pos_cc.mean()
+)
+
+
+param_grid = {
+    "model__learning_rate": [0.03, 0.05, 0.1],
+    "model__max_iter": [100, 200, 300],
+    "model__max_leaf_nodes": [15, 31, 63]
+}
+
+grid_search = GridSearchCV(
+    estimator=gb_bureau_pos_cc,
+    param_grid=param_grid,
+    scoring="roc_auc",
+    cv=cv,
+    n_jobs=-1,
+    verbose=2
+)
+
+grid_search.fit(X_bureau_pos_cc, y_bureau_pos_cc)
+
+print("Best parameters:")
+print(grid_search.best_params_)
+print("Best CV ROC-AUC:")
+print(grid_search.best_score_)
+
+
+grid_results = pd.DataFrame(grid_search.cv_results_)
+
+grid_results[
+    [
+        "param_model__learning_rate",
+        "param_model__max_iter",
+        "param_model__max_leaf_nodes",
+        "mean_test_score",
+        "std_test_score",
+        "rank_test_score"
+    ]
+].sort_values("rank_test_score").head(10)
+
+
+"""
+oof_pred = cross_val_predict(
+    gb_bureau_pos_cc,
+    X_bureau_pos_cc,
+    y_bureau_pos_cc,
+    cv=cv,
+    method="predict_proba",
+    n_jobs=-1
+)[:, 1]
+
+print("OOF predictions created!")
+print(oof_pred.shape)
+
+
+RocCurveDisplay.from_predictions(
+    y_bureau_pos_cc,
+    oof_pred
+)
+
+plt.title("ROC Curve - 7-Table HistGradientBoosting")
+plt.savefig("/Users/athenazhao/Desktop/Athena Zhao Projects/Home Credit/ROC Curve",
+            dpi=300, bbox_inches="tight")
+plt.show()
+
+
+PrecisionRecallDisplay.from_predictions(
+    y_bureau_pos_cc,
+    oof_pred
+)
+
+plt.title("Precision-Recall Curve - 7-Table HistGradientBoosting")
+plt.savefig("/Users/athenazhao/Desktop/Athena Zhao Projects/Home Credit/Precision-Recall Curve",
+            dpi=300, bbox_inches="tight")
+plt.show()
+
+
+y_pred = (oof_pred >= 0.5).astype(int)
+
+ConfusionMatrixDisplay.from_predictions(
+    y_bureau_pos_cc,
+    y_pred,
+    display_labels=["No Default", "Default"]
+)
+
+plt.title("Confusion Matrix - 7-Table HistGradientBoosting")
+plt.savefig("/Users/athenazhao/Desktop/Athena Zhao Projects/Home Credit/Confusion Matrix",
+            dpi=300, bbox_inches="tight")
+plt.show()
+
+
+# Fit model on the full dataset
+gb_bureau_pos_cc.fit(
+    X_bureau_pos_cc,
+    y_bureau_pos_cc
+)
+
+importance = permutation_importance(
+    gb_bureau_pos_cc,
+    X_bureau_pos_cc,
+    y_bureau_pos_cc,
+    scoring="roc_auc",
+    n_repeats=5,
+    random_state=42,
+    n_jobs=-1
+)
+
+feature_importance = pd.DataFrame({
+    "Feature": X_bureau_pos_cc.columns,
+    "Importance": importance.importances_mean
+})
+
+feature_importance = feature_importance.sort_values(
+    "Importance",
+    ascending=False
+)
+
+feature_importance.head(20)
+
+top20 = feature_importance.head(20)
+
+plt.figure(figsize=(10, 8))
+
+plt.barh(
+    top20["Feature"][::-1],
+    top20["Importance"][::-1]
+)
+
+plt.xlabel("Mean decrease in ROC-AUC")
+plt.ylabel("Feature")
+plt.title("Top 20 Feature Importances")
+plt.tight_layout()
+plt.savefig("/Users/athenazhao/Desktop/Athena Zhao Projects/Home Credit/Top 20 Feature Importances",
+            dpi=300, bbox_inches="tight")
+plt.show()
+"""
+test = pd.read_csv("application_test.csv")
+test["AGE_YEARS"] = -test["DAYS_BIRTH"]/365
+test["INCOME_LOG"] = np.log1p(test["AMT_INCOME_TOTAL"])
+test = test.merge(
+    bureau_agg,
+    on="SK_ID_CURR",
+    how="left"
+)
+
+test = test.merge(
+    bureau_status,
+    on="SK_ID_CURR",
+    how="left"
+)
+
+test = test.merge(
+    previous_agg,
+    on="SK_ID_CURR",
+    how="left"
+)
+
+test = test.merge(
+    installments_agg,
+    on="SK_ID_CURR",
+    how="left"
+)
+
+test = test.merge(
+    bureau_balance_curr_agg,
+    on="SK_ID_CURR",
+    how="left"
+)
+
+test = test.merge(
+    pos_per_curr,
+    on="SK_ID_CURR",
+    how="left"
+)
+
+
+test = test.merge(
+    cc_per_curr,
+    on="SK_ID_CURR",
+    how="left"
+)
+
+X_test_bureau_pos_cc = test.drop(
+    columns=["SK_ID_CURR"]
+)
+
+cat_cols_test = X_test_bureau_pos_cc.select_dtypes(
+    include=["object", "str"]
+).columns
+X_test_bureau_pos_cc = pd.get_dummies(
+    X_test_bureau_pos_cc,
+    columns=cat_cols_test,
+    dummy_na=True
+)
+
+X_test_bureau_pos_cc = X_test_bureau_pos_cc.reindex(
+    columns=X_bureau_pos_cc.columns,
+    fill_value=0
+)
+
+test_pred = grid_search.predict_proba(
+    X_test_bureau_pos_cc
+)[:, 1]
+
+submission = pd.DataFrame({
+    "SK_ID_CURR": test["SK_ID_CURR"],
+    "TARGET": test_pred
+})
+
+print(submission.head())
+submission.to_csv(
+    "submission.csv",
+    index=False
+)
